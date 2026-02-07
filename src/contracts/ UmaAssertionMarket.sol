@@ -37,7 +37,7 @@ interface OptimisticOracleV3CallbackRecipientInterface {
                     UMA OPTIMISTIC ASSERTION MARKET
 //////////////////////////////////////////////////////////////*/
 
-contract UmaOptimisticAssertionMarket
+contract UmaAssertionMarket
     is OptimisticOracleV3CallbackRecipientInterface
 {
     /*//////////////////////////////////////////////////////////////
@@ -195,3 +195,6 @@ contract UmaOptimisticAssertionMarket
     //////////////////////////////////////////////////////////////*/
     receive() external payable {}
 }
+
+
+
