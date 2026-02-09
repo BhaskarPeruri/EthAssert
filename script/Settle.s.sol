@@ -2,7 +2,7 @@
 // pragma solidity ^0.8.20;
 
 // import "forge-std/Script.sol";
-// import "../src/contracts/UmaAssertionMarket.sol";
+// import "../src/UmaAssertionMarket.sol";
 
 // contract SettleScript is Script {
 //     address constant MARKET =

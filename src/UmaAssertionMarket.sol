@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
 /*//////////////////////////////////////////////////////////////
                         UMA INTERFACES
 //////////////////////////////////////////////////////////////*/
@@ -27,18 +29,24 @@ interface OptimisticOracleV3Interface {
     ) external returns (bytes32);
 
     function disputeAssertion(bytes32 assertionId, address disputer) external;
+
+    function getMinimumBond(address currency) external view returns (uint256);
+
+    function syncUmaParams(bytes32 identifier, address currency) external;
 }
 
 interface OptimisticOracleV3CallbackRecipientInterface {
     function assertionResolvedCallback(bytes32 assertionId, bool assertedTruthfully) external;
+    function assertionDisputedCallback(bytes32 assertionId) external;
 }
 
 /*//////////////////////////////////////////////////////////////
                     UMA OPTIMISTIC ASSERTION MARKET
 //////////////////////////////////////////////////////////////*/
 
-contract UmaAssertionMarket
-    is OptimisticOracleV3CallbackRecipientInterface
+contract UmaAssertionMarket is
+    OptimisticOracleV3CallbackRecipientInterface,
+    ReentrancyGuard
 {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -53,19 +61,19 @@ contract UmaAssertionMarket
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
-    event Asserted(bytes32 indexed assertionId, address indexed asserter);
+    event Asserted(bytes32 indexed assertionId, address indexed asserter, uint256 bond);
     event Disputed(bytes32 indexed assertionId, address indexed disputer);
     event Resolved(bytes32 indexed assertionId, bool truthful);
     event Settled(bytes32 indexed assertionId, address indexed recipient, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
-                            STORAGE (PACKED)
+                                STORAGE
     //////////////////////////////////////////////////////////////*/
     struct Assertion {
-        address asserter;     // winner if TRUE
-        address disputer;     // winner if FALSE
-        uint96 bond;
-        uint96 stake;
+        address asserter;
+        address disputer;
+        uint96 bond;     // WETH bond amount
+        uint96 stake;    // ETH stake
         bool resolved;
         bool truthful;
         bool settled;
@@ -75,13 +83,22 @@ contract UmaAssertionMarket
 
     OptimisticOracleV3Interface public immutable oracle;
     IWETH public immutable weth;
+    address public immutable owner;
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
-    constructor(address _oracle, address _weth) {
+    constructor(
+        address _oracle,
+        address _weth,
+        address _owner
+    ) {
         oracle = OptimisticOracleV3Interface(_oracle);
         weth = IWETH(_weth);
+        owner = _owner;
+
+        // Sync UMA params so minBond(WETH) is non-zero
+        oracle.syncUmaParams("ASSERT_TRUTH", _weth);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -90,28 +107,31 @@ contract UmaAssertionMarket
     function assertTruthETH(
         bytes calldata claim,
         uint64 liveness,
-        bytes32 identifier,
-        uint256 bondAmount
-    ) external payable returns (bytes32 assertionId) {
-        if (msg.value < bondAmount || bondAmount == 0) revert InvalidETH();
+        bytes32 identifier
+    )
+        external
+        payable
+        nonReentrant
+        returns (bytes32 assertionId)
+    {
+        uint256 minBond = oracle.getMinimumBond(address(weth));
+        if (minBond == 0 || msg.value <= minBond) revert InvalidETH();
 
-        uint256 stakeAmount;
-        unchecked {
-            stakeAmount = msg.value - bondAmount;
-        }
+        uint256 bond = minBond;
+        uint256 stake = msg.value - bond;
 
-        // Wrap ETH -> WETH for UMA bond
-        weth.deposit{value: bondAmount}();
-        weth.approve(address(oracle), bondAmount);
+        // Wrap ETH → WETH for UMA bond
+        weth.deposit{value: bond}();
+        weth.approve(address(oracle), bond);
 
         assertionId = oracle.assertTruth(
             claim,
             msg.sender,
-            address(this),
+            address(this), // callback recipient
             address(0),
             liveness,
             IERC20(address(weth)),
-            bondAmount,
+            bond,
             identifier,
             bytes32(0)
         );
@@ -119,38 +139,41 @@ contract UmaAssertionMarket
         assertions[assertionId] = Assertion({
             asserter: msg.sender,
             disputer: address(0),
-            bond: uint96(bondAmount),
-            stake: uint96(stakeAmount),
+            bond: uint96(bond),
+            stake: uint96(stake),
             resolved: false,
             truthful: false,
             settled: false
         });
 
-        emit Asserted(assertionId, msg.sender);
+        emit Asserted(assertionId, msg.sender, bond);
     }
 
     /*//////////////////////////////////////////////////////////////
                         DISPUTE HANDLING
     //////////////////////////////////////////////////////////////*/
-    function disputeAssertionETH(bytes32 assertionId) external payable {
+    function disputeAssertionETH(bytes32 assertionId)
+        external
+        payable
+        nonReentrant
+    {
         Assertion storage a = assertions[assertionId];
         if (a.asserter == address(0)) revert UnknownAssertion();
         if (a.resolved) revert AlreadyResolved();
         if (msg.value != a.bond) revert InvalidETH();
 
-        // Wrap ETH -> WETH for dispute bond
+        // Wrap ETH → WETH for dispute bond
         weth.deposit{value: msg.value}();
         weth.approve(address(oracle), msg.value);
 
         oracle.disputeAssertion(assertionId, msg.sender);
-
         a.disputer = msg.sender;
 
         emit Disputed(assertionId, msg.sender);
     }
 
     /*//////////////////////////////////////////////////////////////
-                        ORACLE CALLBACK
+                        ORACLE CALLBACKS
     //////////////////////////////////////////////////////////////*/
     function assertionResolvedCallback(
         bytes32 assertionId,
@@ -162,17 +185,25 @@ contract UmaAssertionMarket
         if (a.asserter == address(0)) revert UnknownAssertion();
         if (a.resolved) revert AlreadyResolved();
 
-        // CEI: state update first
         a.resolved = true;
         a.truthful = assertedTruthfully;
 
         emit Resolved(assertionId, assertedTruthfully);
     }
 
+    // REQUIRED BY UMA — must NOT revert
+    function assertionDisputedCallback(bytes32 assertionId) external override {
+        if (msg.sender != address(oracle)) revert NotOracle();
+        // no-op
+    }
+
     /*//////////////////////////////////////////////////////////////
                             SETTLEMENT
     //////////////////////////////////////////////////////////////*/
-    function settle(bytes32 assertionId) external {
+    function settle(bytes32 assertionId)
+        external
+        nonReentrant
+    {
         Assertion storage a = assertions[assertionId];
         if (!a.resolved) revert NotResolved();
         if (a.settled) revert AlreadySettled();
@@ -191,10 +222,28 @@ contract UmaAssertionMarket
     }
 
     /*//////////////////////////////////////////////////////////////
+                        EMERGENCY WITHDRAW
+    //////////////////////////////////////////////////////////////*/
+    function withdrawETH(uint256 amount)
+        external
+        nonReentrant
+    {
+        require(msg.sender == owner, "NOT_OWNER");
+        require(address(this).balance >= amount, "INSUFFICIENT_BALANCE");
+
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "ETH_TRANSFER_FAILED");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function getAssertion(bytes32 assertionId) external view returns (Assertion memory) {
+        return assertions[assertionId];
+    }
+
+    /*//////////////////////////////////////////////////////////////
                         RECEIVE ETH
     //////////////////////////////////////////////////////////////*/
     receive() external payable {}
 }
-
-
-

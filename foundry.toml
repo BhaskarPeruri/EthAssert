@@ -5,3 +5,7 @@ optimizer_runs = 200
 via_ir = false
 
 
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@protocol/contracts/=lib/protocol/packages/core/contracts"
+]

@@ -2,35 +2,54 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
-import "../src/contracts/ UmaAssertionMarket.sol";
+
+interface UmaAssertionMarket {
+    function assertTruthETH(
+        bytes calldata claim,
+        uint64 liveness,
+        bytes32 identifier
+    ) external payable returns (bytes32);
+}
 
 contract AssertScript is Script {
+    // 🔁 Replace if redeployed
     address constant MARKET =
-        0x33FBD3a20bdbB2E5fD0373c6dF5c17cCf8430A25;
+        0xE524748488cC11b9AA44bFbf59e5566582D3B525;
 
     function run() external {
-        uint256 pk = vm.envUint("PRIVATE_KEY");
+        uint256 pk = vm.envUint("PRIVATE_KEY_USER1");
         vm.startBroadcast(pk);
 
-        UmaAssertionMarket market = UmaAssertionMarket(payable(MARKET));
+        /*//////////////////////////////////////////////////////////////
+                            ASSERTION DATA
+        //////////////////////////////////////////////////////////////*/
 
         bytes memory claim =
             bytes("ETH price was above $2500 on Feb 1 2026 UTC");
 
-        uint64 liveness = 3600; // 1 hour
-        bytes32 identifier = bytes32("ASSERT_TRUTH");
-        uint256 bond = 0.01 ether;
-        uint256 stake = 0.01 ether;
+        // 1 hour liveness
+        uint64 liveness = 3600;
 
-        bytes32 assertionId = market.assertTruthETH{value: bond + stake}(
-            claim,
-            liveness,
-            identifier,
-            bond
-        );
+        // UMA-whitelisted identifier
+        bytes32 identifier = "ASSERT_TRUTH";
+
+        /**
+         * ETH sent = minBond(WETH) + stake
+         *
+         * Contract derives bond internally via getMinimumBond(WETH)
+         */
+        uint256 ethAmount = 0.05 ether;
+
+        bytes32 assertionId =
+            UmaAssertionMarket(MARKET).assertTruthETH{value: ethAmount}(
+                claim,
+                liveness,
+                identifier
+            );
+
+        console2.log("Assertion created:");
+        console2.logBytes32(assertionId);
 
         vm.stopBroadcast();
-
-        console2.logBytes32(assertionId);
     }
 }
