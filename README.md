@@ -1,6 +1,8 @@
-# UMA Optimistic Oracle v3 — Native ETH Assertion Market
+# EthAssert -  Native ETH Assertion Market
 
 ## Overview
+
+EthAssert is a native ETH assertion market built on UMA Optimistic Oracle v3, providing a gas-optimized, production-grade interface for posting, disputing, and settling claims with ETH-backed bonds.
 
 This project implements a **production-grade, minimal, gas-optimized integration with UMA Optimistic Oracle v3 (OOv3)**.
 
